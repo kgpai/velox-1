@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "folly/Unicode.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "velox/functions/prestosql/types/JsonType.h"
@@ -69,6 +70,13 @@ class JsonFunctionsTest : public functions::test::FunctionBaseTest {
         ? std::make_optional(StringView(json.value()))
         : std::nullopt;
     return makeNullableFlatVector<StringView>({s}, JSON());
+  }
+
+  void testJsonParse(std::string json, std::string expectedJson) {
+    auto data = makeRowVector({makeFlatVector<std::string>({json})});
+    auto result = evaluate("json_parse(c0)", data);
+    auto expected = makeFlatVector<std::string>({expectedJson}, JSON());
+    velox::test::assertEqualVectors(expected, result);
   }
 
   std::pair<VectorPtr, VectorPtr> makeVectors(std::optional<std::string> json) {
@@ -189,13 +197,18 @@ TEST_F(JsonFunctionsTest, jsonParse) {
   };
 
   EXPECT_EQ(jsonParse(std::nullopt), std::nullopt);
+  // Spaces before and after.
+  EXPECT_EQ(jsonParse(R"( "abc"       )"), R"("abc")");
   EXPECT_EQ(jsonParse(R"(true)"), "true");
   EXPECT_EQ(jsonParse(R"(null)"), "null");
   EXPECT_EQ(jsonParse(R"(42)"), "42");
   EXPECT_EQ(jsonParse(R"("abc")"), R"("abc")");
-  EXPECT_EQ(jsonParse(R"([1, 2, 3])"), "[1, 2, 3]");
-  EXPECT_EQ(jsonParse(R"({"k1":"v1"})"), R"({"k1":"v1"})");
-  EXPECT_EQ(jsonParse(R"(["k1", "v1"])"), R"(["k1", "v1"])");
+  EXPECT_EQ(jsonParse("\"abc\u4FE1\""), "\"abc\u4FE1\"");
+  auto utf32cp = folly::codePointToUtf8(U'😀');
+  testJsonParse(fmt::format("\"{}\"", utf32cp), R"("\uD83D\uDE00")");
+  EXPECT_EQ(jsonParse(R"([1, 2, 3])"), "[1,2,3]");
+  EXPECT_EQ(jsonParse(R"({"k1": "v1" })"), R"({"k1":"v1"})");
+  EXPECT_EQ(jsonParse(R"(["k1", "v1"])"), R"(["k1","v1"])");
 
   VELOX_ASSERT_THROW(
       jsonParse(R"({"k1":})"), "The JSON document has an improper structure");
@@ -228,7 +241,7 @@ TEST_F(JsonFunctionsTest, jsonParse) {
 
   VELOX_ASSERT_THROW(
       evaluate("json_parse(c0)", data),
-      "Unexpected trailing content in the JSON input");
+      "TAPE_ERROR: The JSON document has an improper structure: missing or superfluous commas, braces, missing keys, etc.");
 
   data = makeRowVector({makeFlatVector<StringView>(
       {R"("This is a long sentence")", R"("This is some other sentence")"})});
@@ -274,6 +287,92 @@ TEST_F(JsonFunctionsTest, jsonParse) {
   } catch (const VeloxUserError& e) {
     ASSERT_EQ(e.context(), "Top-level Expression: json_parse(c0)");
   }
+}
+
+TEST_F(JsonFunctionsTest, canonicalization) {
+  auto json = R"({
+  "menu": {
+      "id": "file",
+      "value": "File",
+      "popup": {
+          "menuitem": [
+              {
+                  "value": "New",
+                  "onclick": "CreateNewDoc() "
+              },
+              {
+                  "value": "Open",
+                  "onclick": "OpenDoc() "
+              },
+              {
+                  "value": "Close",
+                  "onclick": "CloseDoc() "
+              }
+          ]
+  }
+  }
+  })";
+
+  auto expectedJson =
+      R"({"menu":{"id":"file","popup":{"menuitem":[{"onclick":"CreateNewDoc() ","value":"New"},{"onclick":"OpenDoc() ","value":"Open"},{"onclick":"CloseDoc() ","value":"Close"}]},"value":"File"}})";
+  testJsonParse(json, expectedJson);
+
+  json =
+      "{\n"
+      "  \"name\": \"John Doe\",\n"
+      "  \"address\": {\n"
+      "    \"street\": \"123 Main St\",\n"
+      "    \"city\": \"Anytown\",\n"
+      "    \"state\": \"CA\",\n"
+      "    \"zip\": \"12345\"\n"
+      "  },\n"
+      "  \"phoneNumbers\": [\n"
+      "    {\n"
+      "      \"type\": \"home\",\n"
+      "      \"number\": \"555-1234\"\n"
+      "    },\n"
+      "    {\n"
+      "      \"type\": \"work\",\n"
+      "      \"number\": \"555-5678\"\n"
+      "    }\n"
+      "  ],\n"
+      "  \"familyMembers\": [\n"
+      "    {\n"
+      "      \"name\": \"Jane Doe\",\n"
+      "      \"relationship\": \"wife\"\n"
+      "    },\n"
+      "    {\n"
+      "      \"name\": \"Jimmy Doe\",\n"
+      "      \"relationship\": \"son\"\n"
+      "    }\n"
+      "  ],\n"
+      "  \"hobbies\": [\"golf\", \"reading\", \"traveling\"]\n"
+      "}";
+  expectedJson =
+      R"({"address":{"city":"Anytown","state":"CA","street":"123 Main St","zip":"12345"},"familyMembers":[{"name":"Jane Doe","relationship":"wife"},{"name":"Jimmy Doe","relationship":"son"}],"hobbies":["golf","reading","traveling"],"name":"John Doe","phoneNumbers":[{"number":"555-1234","type":"home"},{"number":"555-5678","type":"work"}]})";
+  testJsonParse(json, expectedJson);
+
+  // Json with spaces in keys
+  json = R"({
+  "menu": {
+      "id": "file",
+      "value": "File",
+      "emptyArray": [],
+      "popup": {
+          "menuitem": [
+              {
+                  "value ": "New ",
+                  "onclick": "CreateNewDoc() ",
+                  " value ": " Space "
+              }
+           ]
+  }
+  }
+  })";
+
+  expectedJson =
+      R"({"menu":{"emptyArray":[],"id":"file","popup":{"menuitem":[{" value ":" Space ","onclick":"CreateNewDoc() ","value ":"New "}]},"value":"File"}})";
+  testJsonParse(json, expectedJson);
 }
 
 TEST_F(JsonFunctionsTest, isJsonScalarSignatures) {

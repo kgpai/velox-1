@@ -108,7 +108,8 @@ void testingEncodeUtf16Hex(char32_t codePoint, char*& out) {
   encodeUtf16Hex(codePoint, out);
 }
 
-void escapeString(const char* input, size_t length, char* output) {
+size_t
+escapeString(const char* input, size_t length, char* output, bool skipAscii) {
   char* pos = output;
 
   auto* start = reinterpret_cast<const unsigned char*>(input);
@@ -117,7 +118,12 @@ void escapeString(const char* input, size_t length, char* output) {
     int count = validateAndGetNextUtf8Length(start, end);
     switch (count) {
       case 1: {
-        encodeAscii(int8_t(*start), pos);
+        if (!skipAscii) {
+          encodeAscii(int8_t(*start), pos);
+        } else {
+          *pos++ = *start;
+        }
+
         start++;
         continue;
       }
@@ -148,9 +154,11 @@ void escapeString(const char* input, size_t length, char* output) {
       }
     }
   }
+
+  return (pos - output);
 }
 
-size_t escapedStringSize(const char* input, size_t length) {
+size_t escapedStringSize(const char* input, size_t length, bool skipAscii) {
   // 6 chars that is returned by `writeHex`.
   constexpr size_t kEncodedHexSize = 6;
 
@@ -162,7 +170,12 @@ size_t escapedStringSize(const char* input, size_t length) {
     int count = validateAndGetNextUtf8Length(start, end);
     switch (count) {
       case 1:
-        outSize += encodedAsciiSizes[int8_t(*start)];
+        if (!skipAscii) {
+          outSize += encodedAsciiSizes[int8_t(*start)];
+        } else {
+          outSize++;
+        }
+
         break;
       case 2:
       case 3:
