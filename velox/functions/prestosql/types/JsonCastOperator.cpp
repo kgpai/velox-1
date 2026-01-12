@@ -556,7 +556,11 @@ void castToJsonFromRow(
     const SelectivityVector& rows,
     FlatVector<StringView>& flatResult,
     const std::shared_ptr<exec::CastHooks>& hooks) {
-  using NameJsonPair = std::pair<std::string, AsJson>;
+  // NameJsonPair also stores index of the child in the row vector.
+  // since we are sorting the children based on their field names, we need
+  // to store the index of the child in the row vector.
+  using NameJsonPair =
+      std::pair<std::pair<std::string, vector_size_t>, std::optional<AsJson>>;
   // input is guaranteed to be in flat encoding when passed in.
   VELOX_CHECK_EQ(input.encoding(), VectorEncoding::Simple::ROW);
   auto inputRow = input.as<RowVector>();
@@ -577,23 +581,43 @@ void castToJsonFromRow(
     std::optional<std::string> fieldName =
         fieldNamesInJsonCastEnabled ? std::optional{name} : std::nullopt;
 
-    jsonChildren.emplace_back(
-        name,
-        AsJson{
-            context,
-            inputRow->childAt(i),
-            rows,
-            nullptr,
-            hooks,
-            false,
-            std::move(fieldName)});
+    auto inputRowChild = inputRow->childAt(i);
+
+    // Use a pointer to avoid copying SelectivityVector when there are no nulls.
+    // Only create a new SelectivityVector when the child has nulls that need
+    // to be filtered out.
+    SelectivityVector childRowsHolder;
+    const SelectivityVector* childRowsPtr = &rows;
+    if (inputRowChild->mayHaveNulls()) {
+      childRowsHolder = rows;
+      childRowsHolder.deselectNulls(
+          inputRowChild->rawNulls(), rows.begin(), rows.end());
+      childRowsPtr = &childRowsHolder;
+    }
+    const SelectivityVector& childRows = *childRowsPtr;
+
+    if (childRows.hasSelections()) {
+      jsonChildren.emplace_back(
+          std::pair{name, i},
+          AsJson{
+              context,
+              inputRowChild,
+              childRows,
+              nullptr,
+              hooks,
+              false,
+              std::move(fieldName)});
+    } else {
+      // All rows are null for this child - store nullopt.
+      jsonChildren.emplace_back(std::pair{name, i}, std::nullopt);
+    }
 
     context.applyToSelectedNoThrow(rows, [&](auto row) {
-      if (inputRow->isNullAt(row)) {
+      if (inputRow->isNullAt(row) || inputRowChild->isNullAt(row)) {
         // "null" will be inlined in the StringView.
         return;
       }
-      childrenStringSize += jsonChildren[i].second.lengthAt(row);
+      childrenStringSize += jsonChildren[i].second->lengthAt(row);
     });
   }
 
@@ -634,7 +658,18 @@ void castToJsonFromRow(
       if (i > 0) {
         proxy.append(","_sv);
       }
-      jsonChildren[i].second.append(row, proxy);
+
+      auto nameIndex = jsonChildren[i].first;
+      if (!jsonChildren[i].second.has_value() ||
+          inputRow->childAt(nameIndex.second)->isNullAt(row)) {
+        if (fieldNamesInJsonCastEnabled) {
+          proxy.append(fmt::format("\"{}\":null", nameIndex.first));
+        } else {
+          proxy.append("null"_sv);
+        }
+        continue;
+      }
+      jsonChildren[i].second->append(row, proxy);
     }
 
     if (fieldNamesInJsonCastEnabled) {
