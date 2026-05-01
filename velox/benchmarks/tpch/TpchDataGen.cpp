@@ -41,6 +41,7 @@
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/tpch/TpchConnector.h"
 #include "velox/connectors/tpch/TpchConnectorSplit.h"
+#include "velox/core/QueryConfig.h"
 #include "velox/dwio/common/FileSink.h"
 #include "velox/dwio/common/Options.h"
 #include "velox/dwio/common/WriterFactory.h"
@@ -163,9 +164,14 @@ std::chrono::milliseconds generateTable(
             /*partNumber=*/i));
   }
 
+  // task_writer_count defaults to 4 in core::QueryConfig — without this
+  // override, only 4 writer drivers run regardless of maxDrivers, producing
+  // 4 output files even when scan parallelism is higher. Pin it to numDrivers
+  // so each driver writes its own file and all cores stay busy.
   const auto start = std::chrono::steady_clock::now();
   exec::test::AssertQueryBuilder(plan)
       .maxDrivers(numDrivers)
+      .config(core::QueryConfig::kTaskWriterCount, std::to_string(numDrivers))
       .splits(std::move(splits))
       .copyResults(pool);
   return std::chrono::duration_cast<std::chrono::milliseconds>(
