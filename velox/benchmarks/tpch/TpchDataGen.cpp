@@ -41,6 +41,7 @@
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/tpch/TpchConnector.h"
 #include "velox/connectors/tpch/TpchConnectorSplit.h"
+#include "velox/dwio/common/FileSink.h"
 #include "velox/dwio/common/Options.h"
 #include "velox/dwio/common/WriterFactory.h"
 #include "velox/dwio/parquet/RegisterParquetWriter.h"
@@ -103,6 +104,7 @@ constexpr std::string_view kHiveConnectorId{"test-hive"};
 // write Parquet files through the Hive connector.
 void registerVeloxComponents() {
   filesystems::registerLocalFileSystem();
+  dwio::common::registerFileSinks();
   parquet::registerParquetWriterFactory();
 
   auto emptyConfig = std::make_shared<config::ConfigBase>(
