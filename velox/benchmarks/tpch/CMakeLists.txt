@@ -43,3 +43,24 @@ target_link_libraries(
 add_executable(velox_tpch_benchmark TpchBenchmarkMain.cpp)
 
 target_link_libraries(velox_tpch_benchmark velox_tpch_benchmark_lib)
+
+# Standalone utility that generates TPC-H Parquet data at a given scale factor
+# using Velox's own TpchConnector + Parquet writer. Output layout matches what
+# velox_tpch_benchmark expects, so the same directory can be consumed by both
+# the benchmark and other engines (e.g. DuckDB) for cross-engine comparison.
+add_executable(velox_tpch_data_gen TpchDataGen.cpp)
+
+target_link_libraries(
+  velox_tpch_data_gen
+  velox_exec
+  velox_exec_test_lib
+  velox_dwio_common
+  velox_dwio_parquet_writer
+  velox_hive_connector
+  velox_tpch_connector
+  velox_tpch_gen
+  Folly::folly
+  gflags::gflags
+  glog::glog
+  fmt::fmt
+)
